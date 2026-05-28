@@ -1,0 +1,1819 @@
+---
+title: 'ADDRESSING POSITIVITY VIOLATIONS WITH INCREMENTAL PROPENSITY SCORE INTERVENTIONS'
+output: html_document
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+library(ggtext)
+library(ggpubr)
+library(showtext)
+library(png)
+library(grid)
+library(gridExtra)
+library(cowplot)
+
+library(data.table)
+library(glmnet)
+
+library(knitr)
+library(kableExtra)
+
+library(tictoc)
+
+
+library(rpart)
+library(randomForest)
+library(mgcv)
+library(SuperLearner)
+```
+
+
+
+```{r}
+source("thesis_functions.R")
+# when updating and reloading the functions, the simulation- and estimator list also needs to be updated/ run again
+```
+
+
+
+# .
+
+# SETUP
+
+## DGPs
+
+```{r}
+# simulated data generating processes
+sim_processes <- list(
+  no = sim_no,
+  prac = sim_prac,
+  struc = sim_struc,
+  struc_prac = sim_struc_prac
+)
+
+sim_titles <- c(
+  no = "No Positivity Violations",
+  prac = "Practical Positivity Violations",
+  struc = "Structural Positivity Violations",
+  struc_prac = "Combined Positivity Violations"
+)
+```
+
+
+## PLOTTING TRUE PSs
+
+```{r}
+ps_colors_neon <- c(
+  no          = "#00FFAA",  
+  struc       = "#FF00EF",  
+  prac        = "#FF2A00",  
+  struc_prac  = "#00E5FF" 
+)
+
+ps_colors <- c(
+  no          = "#596BE4FF",
+  prac        = "#BF7CF6FF",
+  struc       = "#9FD3CEFF",
+  struc_prac  = "#BEC8ECFF"
+)
+
+ps_linetypes <- c(
+  no = "solid",
+  prac = "solid",
+  struc = "dotdash",
+  struc_prac = "twodash"
+)
+
+ps_labels <- c(
+  no = "No",
+  prac = "Practical",
+  struc = "Structural",
+  struc_prac = "Combined"
+)
+```
+
+
+```{r}
+# sampling nn covariates to plot the true PSs
+nn <- 4e2
+is_discrete <- FALSE
+
+if (is_discrete) {
+  W <- sample(0:4, size = nn, replace = TRUE)
+  W_out <- (W == 3)
+} else {
+  W <- runif(nn, 0, 4)
+  W_out <- (2 < W & W < 3)
+}
+
+# defining the true PSs
+g1_no <- plogis(-2 + W)
+
+g1_prac <- plogis(-4 + W)
+
+g1_struc <- g1_no
+g1_struc[W_out] <- 0
+
+g1_struc_prac <- g1_prac
+g1_struc_prac[W_out] <- 0
+
+
+ps_plot <- data.table(
+  W          = W,
+  no         = g1_no,
+  prac       = g1_prac,
+  struc      = g1_struc,
+  struc_prac = g1_struc_prac
+)
+
+ps_dt <- melt(ps_plot,
+              id.vars = "W",
+              variable.name = "method",
+              value.name = "g")
+```
+
+
+
+```{r, fig.width=8, fig.height=5}
+ps_dt[, g_plot := g]
+ps_dt[method %in% c("struc", "struc_prac") & g == 0, g_plot := NA]
+ps_dt[, method := factor(method, levels = c("no", "prac", "struc_prac", "struc"))]
+
+flat_dt <- ps_dt[is.na(g_plot)]
+
+# plotting the true PSs
+ps_plot <- ggplot(
+  ps_dt,
+  aes(
+    x = W,
+    y = g_plot,
+    color = method,
+    linetype = method
+    )
+  ) +
+  
+  geom_hline(
+    yintercept = seq(0, 1, by = 0.2),
+    color = "grey91",
+    linewidth = 0.4
+  ) +
+  
+  geom_line(linewidth = 1.5) +
+  
+  geom_line(
+    data = flat_dt,
+    aes(y = 0),
+    linewidth = 1.5
+  ) +
+  
+  scale_color_manual(
+    values = ps_colors,
+    breaks = c("no", "prac", "struc", "struc_prac"),
+    labels = ps_labels
+  ) +
+  
+  scale_linetype_manual(
+    values = ps_linetypes,
+    breaks = c("no", "prac", "struc", "struc_prac"),
+    labels = ps_labels
+  ) +
+  
+  scale_x_continuous(
+    breaks = seq(0, 4, 1),
+    expand = expansion(mult = 0, add = 0.02)
+  ) +
+  
+  scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    expand = expansion(mult = 0, add = 0.02)
+  ) +
+  
+  labs(
+    title = "True Propensity Scores",
+    x = "W",
+    y = expression(P(A==1 ~ "|" ~ W)),
+    color = NULL,
+    linetype = NULL
+  ) +
+  
+  theme_light(base_size = 16) +
+  theme(
+    # panel.grid = element_blank(),
+    panel.border = element_blank(),
+    plot.title = element_text(face = "bold", size = 18, hjust = 0),
+    plot.title.position = "plot",
+    
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 16),
+    
+    legend.position = "bottom",
+    legend.justification = 0
+  ) +
+  
+  guides(
+    color = guide_legend(
+      title = "Violations:",
+      nrow = 1
+    ),
+    linetype = guide_legend(
+      title = "Violations:",
+      nrow = 1,
+      override.aes = list(
+        linewidth = 2,
+        linetype = "solid"
+      )
+    )
+  )
+
+
+ggsave(
+  filename = "true_propensity_scores.png",
+  plot = ps_plot,
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+
+ps_plot
+```
+
+```{r}
+plogis(-2)
+plogis(2)
+
+plogis(-4)
+plogis(0)
+```
+
+
+
+## TARGETS
+
+```{r}
+# https://r-graph-gallery.com/color-palette-finder
+# Flourite
+# colors <- c(
+#   "#596BE4FF",
+#   "#3FE6F8FF",
+#   "#202841FF",
+#   "#957BF9FF",
+#   "#BF7CF6FF",
+#   "#332A91FF",
+#   "#1F76AFFF",
+#   "#6FB7B2FF",
+#   "#9FD3CEFF",
+#   "#F2B97AFF",
+#   "#E89A4FFF",
+#   "#0B4F7AFF",
+#   "#62A7BDFF"
+# )
+
+
+target_colors <- c(
+  standard  = "#332A91FF",
+  truncated = "#BF7CF6FF",
+  trimmed   = "#1F76AFFF",
+  rit       = "#596BE4FF",
+  itt       = "#957BF9FF",
+  ips       = "#6FB7B2FF"
+)
+```
+
+
+## ESTIMATORS
+
+```{r}
+estimators <- list(
+  iptw = list(
+    name = "IPTW",
+    targets = list(
+      standard  = iptw_standard,
+      truncated = iptw_trunc,
+      trimmed   = iptw_trim,
+      rit       = iptw_rit,
+      itt       = iptw_itt,
+      ips       = iptw_ips
+    )
+  ),
+  
+  iptw_hajek = list(
+    name = "HAJEK",
+    targets = list(
+      standard  = iptw_hajek_standard,
+      truncated = iptw_hajek_trunc,
+      trimmed   = iptw_hajek_trim,
+      rit       = iptw_hajek_rit,
+      itt       = iptw_hajek_itt,
+      ips       = iptw_hajek_ips
+    )
+  ),
+  
+  onestep = list(
+    name = "OSE",
+    targets = list(
+      standard  = onestep_standard,
+      truncated = onestep_trunc,
+      trimmed   = onestep_trim,
+      rit       = onestep_rit,
+      itt       = onestep_itt,
+      ips       = onestep_ips
+    )
+  ),
+  
+  tmle = list(
+    name = "TMLE",
+    targets = list(
+      standard  = tmle_standard,
+      truncated = tmle_trunc,
+      trimmed   = tmle_trim,
+      rit       = tmle_rit,
+      itt       = tmle_itt,
+      ips       = tmle_ips
+    )
+  )
+  
+)
+```
+
+
+## PARAMETERS
+
+```{r}
+alpha_vals <- c(1e-6, 0.01, 0.02, 0.03, 0.04, 0.05)
+delta_vals <- c(1e-6, 1, 2, 3, 4, 10)
+```
+
+
+
+# .
+# TARGET PARAMETERS
+
+
+```{r}
+target_parameter_mc_simulation <- function(is_discrete, sample_sizes, m) {
+  # timing this function
+  tic()
+  
+  # desired figure width and figure height so that the margin fits
+  figw <- 8
+  figh <- 5
+
+  type_label <- if (is_discrete) "discrete" else "continuous"
+  do_bars <- length(sample_sizes) > 1
+  
+  plots_by_n <- list()
+  
+  
+  for (n in sample_sizes) {
+    n_label <- paste0("n1e", log10(n))
+    
+    results <- list()
+    plots <- list()
+    
+    
+    for (name in names(sim_processes)) {
+      # cat(sim_titles[name], "\n")
+      
+      m_results <- vector("list", m)
+      
+      for (i in 1:m) {
+        sim <- sim_processes[[name]](n, is_discrete = is_discrete)
+        # run monte carlo and add columns to store iteration number and data generating process
+        res <- run_oracles(sim, alpha_vals, delta_vals)[, `:=`(positivity = name, sample_size = n, draw = i)]
+        m_results[[i]] <- res
+      }
+      
+      m_results <- rbindlist(m_results)
+      aggr_m_results <- m_results[, .(
+        psi = mean(psi),
+        sd_psi = sd(psi),
+        se_psi = sd(psi)/sqrt(m)
+        ),
+        by = .(positivity, sample_size, method, parameter, type)]
+      
+      results[[name]] <- aggr_m_results
+      oracle_plot_data <- make_plot_data(aggr_m_results)
+      
+      # match method to color
+      methods <- unique(oracle_plot_data$results_plot$method)
+      targets <- get_target(methods)
+      cols <- target_colors[targets]
+      method_colors <- setNames(cols, methods)
+      
+      
+      p <- plot_methods(
+        oracle_plot_data,
+        paste0(sim_titles[name], " (n = 1e", log10(n), ", m=", m, ")"),
+        method_colors,
+        y_label = "Target Value",
+        bars = do_bars
+      )
+      
+      plots[[name]] <- p
+      
+      # saving plot
+      ggsave(
+        filename = paste0("oracles_", n_label, "_", type_label, "_m", m, "_",  name, ".png"),
+        plot = p,
+        width = figw,
+        height = figh,
+        dpi = 300
+      )
+    }
+  
+  
+    # saving results data
+    results <- rbindlist(results, fill = TRUE)
+    fwrite(results, paste0("oracles_", n_label, "_", type_label, "_m", m, "_results.csv"))
+    
+    # combining plots
+    p_all <- plot_grid(
+      plots$no,
+      plots$prac,
+      plots$struc,
+      plots$struc_prac,
+      nrow = 2
+    )
+    
+    # saving combined plot
+    ggsave(
+      filename = paste0("oracles_", n_label, "_", type_label, "_m", m, "_all.png"),
+      plot = p_all,
+      width = 2 * figw,
+      height = 2 * figh,
+      dpi = 300
+    )
+    
+    plots_by_n[[paste0("n_1e", log10(n))]] <- plots
+    print(p_all)
+  }
+  
+  elapsed <- toc(quiet = TRUE)
+  cat(
+    "sample_sizes =",
+    paste(format(sample_sizes, scientific = TRUE), collapse = ", "),
+    ", m =", m,
+    "~",
+    round(elapsed$toc - elapsed$tic, 2),
+    "seconds\n"
+  )
+  # error bars are \pm sd_psi = sd(psi), that is standard deviation over monte carlo runs
+}
+```
+
+
+## [1] SINGLE LARGE
+
+```{r, fig.width=16, fig.height=10}
+target_parameter_mc_simulation(
+  is_discrete = FALSE,
+  sample_sizes = c(1e8),
+  m = 1
+)
+# sample_sizes = 1e+07 , m = 1 ~ 30.14 seconds
+# sample_sizes = 1e+08 , m = 1 ~ 1168.96 seconds
+```
+
+
+## [2] MC AVERAGING
+
+
+```{r, fig.width=16, fig.height=10}
+target_parameter_mc_simulation(
+  is_discrete = FALSE,
+  sample_sizes = c(1e1, 1e2, 1e3, 1e4),
+  m = 500
+)
+# sample_sizes = 1e+01, 1e+02, 1e+03, 1e+04 , m = 200 ~ 21.62 seconds
+# sample_sizes = 1e+01, 1e+02, 1e+03, 1e+04 , m = 500 ~ 35.57 seconds
+```
+
+
+## 2x2 GRID PLOT
+
+```{r}
+make_2x2_grid_plot <- function(is_discrete, sample_sizes, m) {
+  tic()
+
+  type_label <- if (is_discrete) "discrete" else "continuous"
+  n_labels <- paste0("n1e", log10(sample_sizes))
+    
+  # selecting plots to combine
+  files <- paste0(
+    "oracles_", n_labels, "_", type_label, "_m", m, "_all.png"
+  )
+  
+  # desired figure width and figure height so that the margin fits
+  figw <- 8
+  figh <- 5
+  
+  # grab plots
+  plots <- lapply(files, function(file) {
+    plot <- rasterGrob(readPNG(file), interpolate = TRUE)
+    ggdraw() +
+      draw_grob(plot, x = 0, y = 0, width = 1, height = 1)
+  })
+  
+  # combine plots to summary plot
+  p_summary <- plot_grid(
+    plotlist = plots,
+    nrow = 2
+  )
+  
+  
+  ggsave(
+    filename = paste0("oracles_", type_label, "_m", m, "_2x2_grid.png"),
+    plot = p_summary,
+    width = 4 * figw,
+    height = 4 * figh,
+    dpi = 300
+  )
+  
+  elapsed <- toc(quiet = TRUE)
+  cat(
+    "sample_sizes =",
+    paste(format(sample_sizes, scientific = TRUE), collapse = ", "),
+    ", m =", m,
+    "~",
+    round(elapsed$toc - elapsed$tic, 2),
+    "seconds\n"
+  )
+
+}
+```
+
+
+```{r, fig.width=32, fig.height=20}
+make_2x2_grid_plot(
+  is_discrete = FALSE,
+  sample_sizes = c(1e1, 1e2, 1e3, 1e4),
+  m <- 500
+)
+# sample_sizes = 1e+01, 1e+02, 1e+03, 1e+04 , m = 200 ~ 8.83 seconds
+```
+
+
+
+# .
+# ESTIMATORS
+
+```{r}
+# CHECKING IF ORACLE SELECTION IS CORRECT
+
+# loading precomputed oracles
+  res_oracles_test <- fread("oracles_n1e8_continuous_m1_results.csv")
+  
+  specific_oracles_test <- res_oracles_test[, .(
+    positivity,
+    parameter,
+    type,
+    psi_specific = psi,
+    target = get_target(method)
+  )]
+  
+  
+  standard_oracle_test <- specific_oracles_test[target == "standard", .(
+    positivity,
+    psi_standard = psi_specific
+  )]
+  
+  specific_oracles_test
+  standard_oracle_test
+```
+
+
+
+```{r}
+estimator_simulation <- function(
+    is_discrete,
+    sample_sizes,
+    m,
+    nuisance,
+    oracles_results_filename
+) {
+  
+  # timing this code chunk
+  tic()
+  
+  type_label <- if (is_discrete) "discrete" else "continuous"
+  
+  # loading precomputed oracles
+  res_oracles <- fread(oracles_results_filename)
+  
+  specific_oracles <- res_oracles[, .(
+    positivity,
+    parameter,
+    type,
+    psi_specific = psi,
+    target = get_target(method)
+  )]
+  
+  
+  standard_oracle <- specific_oracles[target == "standard", .(
+    positivity,
+    psi_standard = psi_specific
+  )]
+  
+  # iterating over sample sizes
+  for (n in sample_sizes) {
+    
+    n_label <- paste0("n1e", log10(n))
+    results <- list()
+    
+    # iterating over simulation processes
+    for (name in names(sim_processes)) {
+      cat(sim_titles[name], "\n")
+      
+      m_results <- vector("list", m)
+      
+      # iterating over monte carlo draws
+      for (i in 1:m) {
+        sim <- sim_processes[[name]](n, is_discrete = is_discrete)
+        
+        # estimator results
+        res_estimators <- rbindlist(lapply(estimators, function(estimator) {
+          run_estimators(sim, name, estimator, alpha_vals, delta_vals, nuisance)
+        }), fill = TRUE)
+        
+        # store results
+        res_estimators[, `:=`(positivity = name, sample_size = n, draw = i)]
+        m_results[[i]] <- res_estimators
+      }
+      
+      # combining monte carlo draws
+      m_results <- rbindlist(m_results)
+      m_results[, target := get_target(method)]
+      
+      # including oracle results
+      m_results <- merge(
+        m_results,
+        specific_oracles,
+        by = c("positivity", "target", "parameter", "type"),
+        all.x = TRUE
+      )
+      
+      m_results <- merge(
+        m_results,
+        standard_oracle,
+        by = "positivity",
+        all.x = TRUE
+      )
+      
+      
+      # aggregate results across monte carlo draws
+      aggr_m_results <- m_results[, .(
+        mean_psi          = mean(psi), # avg estimated psi
+        psi_specific      = mean(psi_specific),
+        psi_standard      = mean(psi_standard),
+        mean_sd           = mean(se), # mean estimated sd -> make this clear !!!
+        sd_psi            = sd(psi), # empirical sd
+        sd_ratio          = mean(se) / sd(psi),
+        se_psi            = sd(psi)/sqrt(m), # empirical se
+        mean_ci95_length  = mean(abs(ci95_upper - ci95_lower)),
+        
+        specific_bias     = mean(psi - psi_specific),
+        specific_coverage = mean(ci95_lower <= psi_specific & psi_specific <= ci95_upper),
+        standard_bias     = mean(psi - psi_standard),
+        standard_coverage = mean(ci95_lower <= psi_standard & psi_standard <= ci95_upper)
+        ),
+        by = .(positivity, sample_size, estimator, method, parameter, type)][
+          , `:=`(
+            specific_coverage_se = sqrt(specific_coverage * (1 - specific_coverage) / m),
+            specific_mse         = specific_bias^2 + sd_psi^2,
+            standard_coverage_se = sqrt(standard_coverage * (1 - standard_coverage) / m),
+            standard_mse         = standard_bias^2 + sd_psi^2
+      )]
+      results[[name]] <- aggr_m_results
+    }
+  
+    # saving results data
+    results <- rbindlist(results, fill = TRUE)
+    fwrite(
+      results,
+      paste0("estimators_", nuisance, "_", n_label, "_", type_label, "_m", m, "_results.csv")
+    )
+  }
+  
+  elapsed <- toc(quiet = TRUE)
+  cat(
+    nuisance, 
+    ", sample_sizes =",
+    paste(format(sample_sizes, scientific = TRUE), collapse = ", "),
+    ", m =", m,
+    "~",
+    round(elapsed$toc - elapsed$tic, 2),
+    "seconds\n"
+  )
+}
+```
+
+
+## [3] CORRECT
+
+```{r}
+estimator_simulation(
+  is_discrete = FALSE,
+  sample_size = c(1e5),
+  m = 500,
+  nuisance = "correct",
+  oracles_results_filename = "oracles_n1e8_continuous_m1_results.csv"
+)
+# correct , sample_sizes = 1e+04 , m = 10 ~ 29.27 seconds
+# correct , sample_sizes = 1e+05 , m = 500 ~ 11472.15 seconds
+```
+
+## [4] MISSPECIFIED g
+
+```{r}
+estimator_simulation(
+  is_discrete = FALSE,
+  sample_size = c(1e5),
+  m = 500,
+  nuisance = "misspecifiedg",
+  oracles_results_filename = "oracles_n1e8_continuous_m1_results.csv"
+)
+# misspecifiedg , sample_sizes = 1e+05 , m = 500 ~ 11817.23 seconds
+# misspecifiedg , sample_sizes = 1e+05 , m = 500 ~ 18670.2 seconds
+```
+
+
+## [5] GAM g
+
+```{r}
+estimator_simulation(
+  is_discrete = FALSE,
+  sample_size = c(1e5),
+  m = 500,
+  nuisance = "gamg",
+  oracles_results_filename = "oracles_n1e8_continuous_m1_results.csv"
+)
+# gamg , sample_sizes = 1e+05 , m = 500 ~ 20931.3 seconds
+```
+
+
+## [6] MISSPECIFIED Q
+
+
+```{r}
+estimator_simulation(
+  is_discrete = FALSE,
+  sample_size = c(1e5),
+  m = 500,
+  nuisance = "misspecifiedQ",
+  oracles_results_filename = "oracles_n1e8_continuous_m1_results.csv"
+)
+# misspecifiedQ , sample_sizes = 1e+05 , m = 500 ~ 12003.95 seconds
+```
+
+
+
+## [7] MISSPECIFIED
+
+```{r}
+estimator_simulation(
+  is_discrete = FALSE,
+  sample_size = c(1e5),
+  m = 500,
+  nuisance = "misspecified",
+  oracles_results_filename = "oracles_n1e8_continuous_m1_results.csv"
+)
+# misspecified , sample_sizes = 1e+05 , m = 500 ~ 17472.63 seconds
+# misspecified , sample_sizes = 1e+05 , m = 500 ~ 20623.23 seconds
+```
+
+## .
+## PLOTTING
+
+### PSI
+
+
+
+```{r}
+plotting_psi_estimates <- function(
+    estimators_results_filename,
+    n,
+    m,
+    nuisance_title
+) {
+  
+  tic()
+  
+  # desired figure width and figure height so that the margin fits
+  figw <- 8
+  figh <- 5
+  
+  results_estimators <- fread(estimators_results_filename)
+  
+  estimator_names <- unique(results_estimators$estimator)
+  plots_by_estimator <- list()
+  
+  
+  for (est in estimator_names) {
+    
+    est_data <- results_estimators[estimator == est]
+    plots <- list()
+  
+    for (name in names(sim_processes)) {
+      
+      sub_data <- est_data[positivity == name][, psi := mean_psi]
+      est_plot_data <- make_plot_data(sub_data)
+      
+      # match method to color
+      methods <- unique(est_plot_data$results_plot$method)
+      targets <- get_target(methods)
+      cols <- target_colors[targets]
+      method_colors <- setNames(cols, methods)
+    
+      p <- plot_methods(
+        est_plot_data,
+        paste0(sim_titles[name], " (n = 1e", log10(n), ", m=", m, ")"),
+        method_colors,
+        y_label = "Target Value",
+        bars = TRUE
+      )
+    
+      plots[[name]] <- p
+      
+      # # saving plot single plot
+      # ggsave(
+      #   filename = paste0("oracles_", n_label, "_", type_label, "_m", m, "_",  name, ".png"),
+      #   plot = p,
+      #   width = figw,
+      #   height = figh,
+      #   dpi = 300
+      # )
+    }
+  
+    # combining plots
+    p_grid <- plot_grid(
+      plots$no,
+      plots$prac,
+      plots$struc,
+      plots$struc_prac,
+      nrow = 2
+    )
+    
+    # https://wilkelab.org/cowplot/articles/plot_grid.html
+    # adding nuisance title above without changing grid scaling
+    title <- ggdraw() +
+      draw_label(nuisance_title, fontface = "bold", size = 24, x = 0, hjust = 0) +
+      theme(
+        plot.margin = ggplot2::margin(0, 0, 0, 0)
+      )
+    
+    # stacking title and grid plot
+    p_all <- plot_grid(
+      title,
+      p_grid,
+      ncol = 1,
+      rel_heights = c(0.1, 1)
+    )
+    
+    
+    results_filename <- sub("^estimators", "", estimators_results_filename)
+    results_filename <- sub("_results\\.csv$", "", results_filename)
+  
+    # saving combined plot
+    ggsave(
+      filename = paste0(est, results_filename, ".png"),
+      plot = p_all,
+      width = 2 * figw,
+      height = (2 * figh) * 1.1, # adjusting for title height
+      dpi = 300
+    )
+    
+    plots_by_estimator[[est]] <- plots
+    grid::grid.draw(p_all)
+    
+  }
+  
+  toc()
+}
+```
+
+
+#### [3]
+
+```{r, fig.width=16, fig.height=11}
+plotting_psi_estimates(
+  estimators_results_filename = "estimators_correct_n1e5_continuous_m500_results.csv",
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Correct Nuisance Specification"
+)
+```
+
+#### [4]
+
+
+```{r, fig.width=16, fig.height=11}
+plotting_psi_estimates(
+  estimators_results_filename = "estimators_misspecifiedg_n1e5_continuous_m500_results.csv",
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Treatment Mechanism Misspecification"
+)
+```
+
+
+#### [5]
+
+
+```{r, fig.width=16, fig.height=11}
+plotting_psi_estimates(
+  estimators_results_filename = "estimators_gamg_n1e5_continuous_m500_results.csv",
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Flexible Treatment Estimation"
+)
+```
+
+
+
+#### [6]
+
+
+```{r, fig.width=16, fig.height=10}
+plotting_psi_estimates(
+  estimators_results_filename = "estimators_misspecifiedQ_n1e5_continuous_m500_results.csv",
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Outcome Regression Misspecification"
+)
+```
+
+
+#### [7]
+
+
+```{r, fig.width=16, fig.height=10}
+plotting_psi_estimates(
+  estimators_results_filename = "estimators_misspecified_n1e5_continuous_m500_results.csv",
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Joint Nuisance Misspecification"
+)
+```
+
+
+
+### BIAS, SD, MSE, CP
+
+
+```{r}
+plotting_bias_var_mse <- function(
+    estimators_results_filename,
+    inference_targ,
+    is_discrete,
+    n,
+    m,
+    nuisance_title
+  ) {
+
+  tic()
+  
+  n_label <- paste0("n1e", log10(n))
+  type_label <- if (is_discrete) "discrete" else "continuous"
+  inference_label <- ifelse(
+    inference_targ == "standard",
+    "Standard ",
+    "Specific "
+  )
+  
+  
+  # desired figure width and figure height so that the margin fits
+  figw <- 8
+  figh <- 5
+  
+  
+  results_filename <- sub("^estimators", "", estimators_results_filename)
+  results_filename <- sub("_results\\.csv$", "", results_filename)
+  
+  results_estimators <- fread(estimators_results_filename)
+  
+  results_estimators_long <- melt(
+    results_estimators,
+    id.vars = c("positivity", "sample_size", "estimator", "method", "parameter", "type"),
+    measure.vars = c(
+      paste0(inference_targ, "_bias"),
+      "sd_psi",
+      paste0(inference_targ, "_mse"),
+      paste0(inference_targ, "_coverage")
+    ),
+    variable.name = "metric",
+    value.name = "value"
+  )
+  
+  # rename metrics
+  results_estimators_long[, metric := fcase(
+    metric == paste0(inference_targ, "_bias"), "Bias",
+    metric == "sd_psi", "SD",
+    metric == paste0(inference_targ, "_mse"), "MSE",
+    metric == paste0(inference_targ, "_coverage"), "CP"
+  )]
+  
+  estimator_names <- unique(results_estimators$estimator)
+  
+  for (est in estimator_names) {
+    
+    metrics <- c("Bias", "SD", "MSE", "CP")
+    plots <- list()
+    sum_plots <- list()
+    
+    # match method to color
+    methods <- unique(results_estimators_long[estimator == est, method])
+    targets <- get_target(methods)
+    cols <- target_colors[targets]
+    method_colors <- setNames(cols, methods)
+    
+  
+    for (name in names(sim_processes)) {
+      
+      for (metric_name in metrics) {
+        
+        sub_data <- results_estimators_long[
+          positivity == name &
+          estimator == est &
+          metric == metric_name
+        ][, psi := value]
+        
+        plot_data <- make_plot_data(sub_data)
+        
+        p <- plot_methods(
+          plot_data,
+          paste0(sim_titles[name], " (n = 1e", log10(n), ", m=", m, ")"),
+          method_colors,
+          y_label = paste0(
+            ifelse(metric_name == "SD", "", paste0(" ", inference_label)),
+            metric_name
+          ),
+          bars = FALSE
+        )
+        
+        plots[[paste(metric_name, name, sep = "_")]] <- p
+      }
+      
+      
+      sum_plot <- plot_grid(
+        plots[[paste0("Bias_", name)]],
+        plots[[paste0("SD_", name)]],
+        plots[[paste0("MSE_", name)]],
+        plots[[paste0("CP_", name)]],
+        nrow = 4
+      )
+      
+      sum_plots[[name]] <- sum_plot
+    }
+    
+    # combining plots
+    p_grid_1 <- plot_grid(
+      sum_plots$no,
+      sum_plots$prac,
+      ncol = 2
+    )
+    
+    p_grid_2 <- plot_grid(
+      sum_plots$struc,
+      sum_plots$struc_prac,
+      ncol = 2
+    )
+    
+    
+    # https://wilkelab.org/cowplot/articles/plot_grid.html
+    # adding nuisance title above without changing grid scaling
+    title <- ggdraw() +
+      draw_label(nuisance_title, fontface = "bold", size = 24, x = 0, hjust = 0) +
+      theme(
+        plot.margin = ggplot2::margin(0, 0, 0, 0)
+      )
+    
+    # stacking title and grid plot
+    p_all_1 <- plot_grid(
+      title,
+      p_grid_1,
+      ncol = 1,
+      rel_heights = c(0.1, 1)
+    )
+    
+    p_all_2 <- plot_grid(
+      title,
+      p_grid_2,
+      ncol = 1,
+      rel_heights = c(0.1, 1)
+    )
+  
+  
+    # saving combined plots
+    ggsave(
+      filename = paste0(
+        "performance_no_prac_",
+        inference_targ, "_", est, results_filename, ".png"),
+      plot = p_all_1,
+      width = 2 * figw,
+      height = (4 * figh) * 1.1,
+      dpi = 300
+    )
+    
+    ggsave(
+      filename = paste0(
+        "performance_struc_comb_",
+        inference_targ, "_", est, results_filename, ".png"),
+      plot = p_all_2,
+      width = 2 * figw,
+      height = (4 * figh) * 1.1,
+      dpi = 300
+    )
+    
+    print(p_all_1)
+    print(p_all_2)
+  }
+  
+  elapsed <- toc(quiet = TRUE)
+  cat(
+    "sample_sizes =",
+    paste(format(n, scientific = TRUE), collapse = ", "),
+    ", m =", m,
+    "~",
+    round(elapsed$toc - elapsed$tic, 2),
+    "seconds\n"
+  )
+}
+```
+
+#### [3] STANDARD
+
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_correct_n1e5_continuous_m500_results.csv",
+  inference_targ = "standard",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Correct Nuisance Specification"
+)
+# sample_sizes = 1e+04 , m = 10 ~ 23.08 seconds
+```
+
+
+#### [3] SPECIFIC
+
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_correct_n1e5_continuous_m500_results.csv",
+  inference_targ = "specific",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Correct Nuisance Specification"
+)
+```
+
+
+
+
+
+
+#### [4] STANDARD
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_misspecifiedg_n1e5_continuous_m500_results.csv",
+  inference_targ = "standard",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Treatment Mechanism Misspecification"
+)
+```
+
+
+
+#### [4] SPECIFIC
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_misspecifiedg_n1e5_continuous_m500_results.csv",
+  inference_targ = "specific",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Treatment Mechanism Misspecification"
+)
+```
+
+
+
+#### [5] STANDARD
+
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_gamg_n1e5_continuous_m500_results.csv",
+  inference_targ = "standard",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Flexible Treatment Estimation"
+)
+```
+
+
+
+#### [5] SPECIFIC
+
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_gamg_n1e5_continuous_m500_results.csv",
+  inference_targ = "specific",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Flexible Treatment Estimation"
+)
+```
+
+
+#### [6] STANDARD
+
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_misspecifiedQ_n1e5_continuous_m500_results.csv",
+  inference_targ = "standard",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Outcome Regression Misspecification"
+)
+```
+
+
+#### [6] SPECIFIC
+
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_misspecifiedQ_n1e5_continuous_m500_results.csv",
+  inference_targ = "specific",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Outcome Regression Misspecification"
+)
+```
+
+
+#### [7] STANDARD
+
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_misspecified_n1e5_continuous_m500_results.csv",
+  inference_targ = "standard",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Joint Nuisance Misspecification"
+)
+```
+
+
+#### [7] SPECIFIC
+
+
+```{r, fig.width=16, fig.height=20}
+plotting_bias_var_mse(
+  estimators_results_filename = "estimators_misspecified_n1e5_continuous_m500_results.csv",
+  inference_targ = "specific",
+  is_discrete = FALSE,
+  n = 1e5,
+  m = 500,
+  nuisance_title = "Joint Nuisance Misspecification"
+)
+```
+
+
+
+
+### .
+### CP TABLE
+
+
+```{r}
+results_estimators <- fread(paste0("estimators_", n_label, "_", type_label, "_m", m, "_results.csv"))
+
+tab <- results_estimators[, .(
+  positivity,
+  estimator,
+  method,
+  parameter,
+  type,
+
+  coverage_ind = individ_coverage,
+  coverage_full = full_coverage,
+  ci_length = mean_ci95_length,
+
+  sd_emp = sd_psi, # empirical sd
+  sd_est = mean_sd, # mean estimated sd
+  sd_ratio = sd_ratio # mean(sd) / sd(psi)
+)]
+
+
+setnames(tab, c(
+  "positivity", "estimator", "method", "parameter", "type",
+  "coverage_ind", "coverage_full", "ci_length",
+  "sd_emp", "sd_est", "sd_ratio"
+), c(
+  "Positivity", "Estimator", "Method", "Param", "Type",
+  "CovInd", "CovFull", "CI Width",
+  "SD Emp.", "SD Est.", "Ratio"
+))
+
+
+tabs <- split(tab, tab$Estimator)
+# tabs <- tabs[, !"estimator", with = FALSE]
+
+
+ 
+lapply(names(tabs), function(est) {
+  cat("\n\n\\textbf{Estimator:", est, "} \n\n")
+
+  est_dt <- tabs[[est]][, !c("Estimator", "Type"), with = FALSE]
+  
+  print(nrow(est_dt))
+  
+  print(
+    kable(est_dt, format = "html", booktabs = TRUE, digits = 3) %>% 
+    kable_styling(
+      bootstrap_options = c("striped", "hover"),
+      full_width = FALSE
+    ) %>%
+      row_spec(0, background = "white") %>%
+      row_spec(1:nrow(est_dt), background = "white")
+  )
+  
+  writeLines(
+    kable(
+      est_dt,
+      format = "latex",
+      booktabs = TRUE,
+      longtable = TRUE,
+      digits = 3,
+      caption = "Simulation results for ...",
+      label = "tab:results"
+    ) %>% 
+    kable_styling(
+      latex_options = c("hold_position")
+    ),
+  paste0(est, "_results.tex")
+  )
+
+})
+
+# tab <- gsub(
+#   "\\\\begin\\{longtable\\}\\{",
+#   "\\\\begin{ltablex}{\\\\textwidth}{",
+#   tab
+# )
+# 
+# tab <- gsub(
+#   "\\\\end\\{longtable\\}",
+#   "\\\\end{ltablex}",
+#   tab
+# )
+
+
+# collapse_rows(columns = 1, latex_hline = "major")
+
+# writeLines(
+#   kable(tab, format = "latex", booktabs = TRUE, digits = 3) %>%
+#     kable_styling(latex_options = c("striped", "hold_position")),
+#   "table_results.tex"
+# )
+```
+
+
+
+
+
+
+# .
+
+# JUNKYARD
+
+## PS ESTIMATION METHODS FOR STRUCTURAL VIOLATIONS
+
+```{r, fig.width=8, fig.height=5}
+# # support indicator
+# dd[, support := as.integer(any(A == 1)), by = W]
+
+is_discrete = FALSE
+
+dd <- sim_no(1e4, is_discrete = is_discrete)$data
+
+
+# parametric misspecification
+fit_log <- glm(A ~ I(W^2), family = binomial, data = dd)
+dd$gg1_hat_mis <- predict(fit_log, type = "response")
+
+
+fit_gam <- gam(A ~ s(W), family = binomial, data = dd)
+dd$gg1_hat_gam <- predict(fit_gam, type = "response")
+
+
+
+if (is_discrete) {
+  W_out <- (dd$W == 3)
+} else {
+  W_out <- (2 < dd$W & dd$W < 3)
+}
+
+
+ggplot(dd, aes(x = W, color = factor(A))) +
+  
+  geom_jitter(
+    aes(y = A),
+    height = 0.05,
+    size = 1,
+    alpha = 0.1
+  ) +
+  
+  geom_point(
+    aes(
+      y = ifelse(W_out, 0, plogis(-2 +  W)),
+      color = "True PS"
+    ),
+    size = 0.5,
+    alpha = 0.1) +
+  
+  geom_point(
+    aes(
+      y = gg1_hat_mis,
+      color = "Misspecified PS"
+    ),
+    size = 0.5,
+    alpha = 0.1
+  ) +
+  
+  geom_point(
+    aes(
+      y = gg1_hat_gam,
+      color = "GAM PS"
+    ),
+    size = 0.5,
+    alpha = 0.1
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "0" = "red",
+      "1" = "blue",
+      "True PS" = "green",
+      "Misspecified PS" = "black",
+      "GAM PS" = "magenta"
+    )
+  ) +
+  
+  labs(
+    y = "Received treatment and P(A = 1 | W)",
+    color = "A",
+    title = "Propensity Score Estimation"
+  ) + 
+  
+  theme_light() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0),
+    plot.title.position = "plot",
+    panel.border = element_blank(),
+    legend.title = element_blank()
+  ) +
+  
+  guides(
+  color = guide_legend(
+    override.aes = list(size = 4, alpha = 0.5)
+  )
+)
+```
+
+
+
+
+## TESTING TMLE
+
+
+
+```{r}
+tic()
+
+n <- 1e5
+m <- 50
+is_discrete = FALSE
+
+
+alph <- 1e-6
+delt <- 10
+    
+
+sim_process_results <- list()
+
+for (name in names(sim_processes)) {
+  cat(sim_titles[name], "\n")
+  
+  m_results <- vector("list", m)
+  
+  for (i in 1:m) {
+    # getting simulated data
+    sim <- sim_processes[[name]](n, is_discrete = is_discrete)
+    
+    dd <- sim$data
+    orac <- sim$oracle_full
+    
+    # estimating nuisance parameters
+    # treatment mechanism
+    
+    # fitg <- glm(A ~ W, family = binomial, data = dd)
+    # g1_hat <- predict(fitg, type = "response")
+    
+    # fitg <- glm(A ~ W + I(W^2), family = binomial, data = dd)
+    # g1_hat <- predict(fitg, type = "response")
+    
+    fit_gam <- gam(A ~ s(W), family = binomial, data = dd)
+    g1_hat <- predict(fit_gam, type = "response")
+    
+    # outcome regeression
+    fitQ <- lm(Y ~ A + W, data = dd)
+    
+    dd0 <- copy(dd)[, A := 0]
+    dd1 <- copy(dd)[, A := 1]
+    
+    QA_hat <- predict(fitQ, dd, type = "response")
+    Q0_hat <- predict(fitQ, dd0, type = "response")
+    Q1_hat <- predict(fitQ, dd1, type = "response")
+    
+    iptw <- iptw_ips(dd, g1_hat, QA_hat, Q1_hat, Q0_hat, delt)$psi_hat
+    hajek <- iptw_hajek_ips(dd, g1_hat, QA_hat, Q1_hat, Q0_hat, delt)$psi_hat
+    ose <- onestep_ips(dd, g1_hat, QA_hat, Q1_hat, Q0_hat, delt)$psi_hat
+    tmle <- tmle_ips(dd, g1_hat, QA_hat, Q1_hat, Q0_hat, delt)$psi_hat
+      
+    m_results[[i]] <- data.table(
+      positivity = name,
+      iptw = iptw,
+      hajek = hajek,
+      ose = ose,
+      tmle = tmle,
+      orac = orac
+    )
+  }
+  
+  
+  sim_process_results[[name]] <- rbindlist(m_results)
+  
+}
+
+all_results <- rbindlist(sim_process_results, idcol = "positivity")
+
+aggr_all_results <- all_results[, .(
+  # mean_psi_iptw = mean(iptw),
+  # mean_psi_hajek = mean(hajek),
+  # mean_psi_ose = mean(ose),
+  # mean_psi_tmle = mean(tmle),
+  # orac_psi = mean(orac),
+  bias_iptw = mean(iptw - orac),
+  bias_hajek = mean(hajek - orac),
+  bias_ose = mean(ose - orac),
+  bias_tmle = mean(tmle - orac)
+  ), by = positivity]
+
+print(format(aggr_all_results, scientific = TRUE))
+
+
+toc()
+
+# standard target
+
+
+# correctly specified paramtric treatment glm(A ~ W)
+# positivity   bias_iptw       bias_hajek      bias_ose        bias_tmle      
+# [1,] "no"         "-2.200897e-04" " 1.612533e-04" " 9.093716e-05" " 9.020880e-05"
+# [2,] "prac"       "-2.632797e-04" "-1.376681e-03" "-1.191918e-03" "-1.171793e-03"
+# [3,] "struc"      " 3.391491e-02" "-7.829624e-03" "-2.021762e-04" "-1.955658e-04"
+# [4,] "struc_prac" " 1.841514e-01" "-2.274085e-02" "-7.913215e-04" "-3.098037e-04"
+# 46.589 sec elapsed
+
+
+# misspecified paramtric treatment glm(A ~ W + I(W^2))
+# positivity   bias_iptw       bias_hajek      bias_ose        bias_tmle      
+# [1,] "no"         "-8.335492e-05" "-9.440388e-05" "-9.183303e-05" "-9.198529e-05"
+# [2,] "prac"       "-1.257038e-03" "-1.469970e-03" "-1.420637e-03" "-1.423707e-03"
+# [3,] "struc"      " 4.651730e-02" "-5.478072e-03" "-2.315175e-04" "-2.014539e-04"
+# [4,] "struc_prac" " 4.255706e-02" "-3.810418e-03" " 7.612329e-04" " 6.773247e-04"
+# 49.369 sec elapsed
+
+
+# flexible model treatment gam(A ~ s(W))
+# positivity   bias_iptw       bias_hajek      bias_ose        bias_tmle      
+# [1,] "no"         "-1.896623e-04" "-1.896048e-04" "-1.876008e-04" "-1.879018e-04"
+# [2,] "prac"       "-1.344508e-03" "-1.284189e-03" "-1.282467e-03" "-1.282561e-03"
+# [3,] "struc"      "-8.994253e-02" "-3.404255e-03" " 5.954887e-04" " 6.639964e-04"
+# [4,] "struc_prac" "-7.838256e-02" "-3.417496e-03" " 8.036139e-05" " 8.174534e-05"
+# 180.334 sec elapsed
+
+
+
+# ips specific target
+
+
+# correctly specified paramtric treatment glm(A ~ W)
+# positivity   bias_iptw       bias_hajek      bias_ose        bias_tmle      
+# [1,] "no"         "-1.984425e-05" "-5.590579e-05" "-5.095447e-05" "-4.916473e-05"
+# [2,] "prac"       "-1.567359e-03" "-1.461340e-03" "-1.482914e-03" "-1.430938e-03"
+# [3,] "struc"      " 3.437619e-02" "-7.318803e-03" " 2.056717e-04" " 2.282693e-04"
+# [4,] "struc_prac" " 1.842112e-01" "-2.277509e-02" "-3.308085e-04" "-4.329055e-05"
+# 159.583 sec elapsed
+
+
+# misspecified paramtric treatment glm(A ~ W + I(W^2))
+# positivity   bias_iptw       bias_hajek      bias_ose        bias_tmle      
+# [1,] "no"         " 4.520703e-04" " 4.605753e-04" " 4.574500e-04" " 4.574378e-04"
+# [2,] "prac"       "-1.131845e-03" "-8.489902e-04" "-9.191185e-04" "-9.312353e-04"
+# [3,] "struc"      " 4.651241e-02" "-5.550197e-03" "-2.596523e-04" "-2.539687e-04"
+# [4,] "struc_prac" " 3.995713e-02" "-5.714597e-03" "-1.266851e-03" "-9.638932e-04"
+# 209.719 sec elapsed
+
+
+# flexible model treatment gam(A ~ s(W))
+# positivity   bias_iptw       bias_hajek      bias_ose        bias_tmle      
+# [1,] "no"         "-2.324931e-04" "-2.237528e-04" "-2.233670e-04" "-2.234498e-04"
+# [2,] "prac"       "-8.112450e-04" "-6.753817e-04" "-6.958747e-04" "-6.969559e-04"
+# [3,] "struc"      "-9.100196e-02" "-4.370919e-03" "-3.298970e-04" "-6.947526e-03"
+# [4,] "struc_prac" "-7.995843e-02" "-5.249841e-03" "-1.658994e-03" "-1.974849e-03"
+# 873.071 sec elapsed
+
+
+
+```
+
+
+
+```{r}
+# DIFFERENT SAMPLING PROBABILITIES
+
+# W = sample(0:4, size=n, replace=TRUE, prob=c(0.5, 0.1, 0.1, 0.1, 0.2))
+# W = sample(0:4, size=n, replace=TRUE, prob=c(0.2, 0.1, 0.1, 0.1, 0.5))
+```
+
+```{r}
+# TREATMENT COVARIATE INTERACTIONS
+
+# dt[, Y := rbinom(.N, 1, 0.4 + 0.2*A*(W >= 2))]
+```
+
+```{r}
+# # RIT AND TRUNCATED IPTW ORACLE
+# 
+# # data generation with structural positivity violation
+# W = sample(0:4, size=n, replace=TRUE)
+# p = plogis(-2 +  W)
+# W_out = 3
+# p[W == W_out] = 0
+# A = rbinom(n, size = 1, prob = p)
+# Y = rbinom(n, size = 1, prob = 0.3 + 0.3 * A + 0.05 * W)
+# 
+# # rit estimand
+# d <- ifelse(W %in% W_out, 0, 1)
+# mean(0.3 + 0.3 * d + 0.05 * W) - mean(Y)
+# 
+# 
+# n <- length(W)
+# n1 <- sum(W == W_out)
+# n2 <- sum(W != W_out)
+# 
+# (n1/n) * mean((0.3 + 0.3 * 0 + 0.05 * W)[W == W_out]) + (n2/n) * mean((0.3 + 0.3 * 1 + 0.05 * W)[W != W_out]) - mean(Y)
+# 
+# # the first term is the difference between rit and truncated iptw
+# (n1/n) * mean((0.3 + 0.3 * 0 + 0.05 * W)[W == W_out])
+# 
+# 
+# # iptw truncated
+# alpha_grid <- c(1e-6, 0.01, 0.02, 0.03, 0.04, 0.05)
+# 
+# psi_vals <- sapply(alpha_grid, function(alpha) {
+#   g1_trunc_hat <- pmax(p, alpha)
+#   mean(A / g1_trunc_hat * Y) - mean(Y)
+# })
+# 
+# gg1_trunc_hat <- pmax(p, alpha)
+# psi_vals
+# # truncation does not contribute as A == 0
+# 
+# n <- length(W)
+# 
+# n2/n * mean(A[W != W_out] / gg1_trunc_hat[W != W_out] * Y[W != W_out]) - mean(Y)
+```
+
+
+
+```{r}
+# # SINGLE LARGE RUN TARGET PARAMETER SIMULATION
+
+# target_parameter_simulation <- function(is_discrete, n) {
+#   # timing this function
+#   tic()
+#   
+#   # desired figure width and figure height so that the margin fits
+#   figw <- 8
+#   figh <- 5
+# 
+#   type_label <- if (is_discrete) "discrete" else "continuous"
+#   n_label_oracle <- paste0("n1e", log10(n))
+#   
+#   
+#   results <- list()
+#   plots <- list()
+#   
+#   
+#   for (name in names(sim_processes)) {
+#     # cat(sim_titles[name], "\n")
+#     
+#     sim <- sim_processes[[name]](n, is_discrete = is_discrete)
+#     
+#     res <- run_oracles(sim, alpha_vals, delta_vals)[, positivity := name]
+#     results[[name]] <- res
+#     oracle_plot_data <- make_plot_data(res)
+#     
+#     # match method to color
+#     methods <- unique(oracle_plot_data$results_plot$method)
+#     targets <- get_target(methods)
+#     cols <- target_colors[targets]
+#     method_colors <- setNames(cols, methods)
+#     
+#     
+#     p <- plot_methods(
+#       oracle_plot_data,
+#       paste0(sim_titles[name], " (n = 1e", log10(n), ")"),
+#       method_colors,
+#       y_label = "Target Value",
+#       bars = FALSE
+#     )
+#     
+#     plots[[name]] <- p
+#     
+#     # saving plot
+#     ggsave(
+#       filename = paste0("oracles_", n_label_oracle, "_", type_label, "_", name, ".png"),
+#       plot = p,
+#       width = figw,
+#       height = figh,
+#       dpi = 300
+#     )
+#   }
+#   
+#   
+#   # saving results data
+#   results <- rbindlist(results, fill = TRUE)
+#   fwrite(results, paste0("oracles_", n_label_oracle, "_", type_label, "_results.csv"))
+#   
+#   # combining plots
+#   p_all <- plot_grid(
+#     plots$no,
+#     plots$prac,
+#     plots$struc,
+#     plots$struc_prac,
+#     nrow = 2
+#   )
+#   
+#   # saving combined plot
+#   ggsave(
+#     filename = paste0("oracles_", n_label_oracle, "_", type_label, "_all.png"),
+#     plot = p_all,
+#     width = 2 * figw,
+#     height = 2 * figh,
+#     dpi = 300
+#   )
+#   
+#   print(p_all)
+#   
+#   elapsed <- toc(quiet = TRUE)
+#   cat("n =", n, "~", round(elapsed$toc - elapsed$tic, 2), "seconds\n")
+# }
+# 
+# 
+# target_parameter_simulation(is_discrete = FALSE, n = 1e7)
+# # n = 1e+06 ~ 5.55 seconds
+# # n = 1e+07 ~ 26.9 seconds
+```
+
+
